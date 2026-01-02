@@ -2,7 +2,6 @@ package io.github.andresviedma.tinytuya.device
 
 import io.github.andresviedma.tinytuya.model.DeviceStatus
 import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
-import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Represents a Tuya smart outlet/plug device.

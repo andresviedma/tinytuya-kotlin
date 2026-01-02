@@ -3,7 +3,7 @@ plugins {
     kotlin("plugin.serialization") version "2.1.21"
 }
 
-group = "andresviedma"
+group = "io.github.andresviedma.tinytuya"
 version = "1.0-SNAPSHOT"
 
 repositories {

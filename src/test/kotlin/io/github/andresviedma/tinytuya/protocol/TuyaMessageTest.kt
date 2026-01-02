@@ -2,10 +2,7 @@ package io.github.andresviedma.tinytuya.protocol
 
 import io.github.andresviedma.tinytuya.crypto.TuyaCipher
 import io.github.andresviedma.tinytuya.network.TuyaScanner
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.crc32
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.crc32Bytes
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.hexToBytes
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.md5
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
 import kotlin.test.Test
 import kotlin.test.assertEquals

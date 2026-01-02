@@ -7,17 +7,36 @@ import io.github.andresviedma.tinytuya.protocol.TuyaCommand
 import io.github.andresviedma.tinytuya.protocol.TuyaMessage
 import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
 import io.github.oshai.kotlinlogging.KotlinLogging
-import io.ktor.network.selector.*
-import io.ktor.network.sockets.*
-import io.ktor.utils.io.*
+import io.ktor.network.selector.SelectorManager
+import io.ktor.network.sockets.Socket
+import io.ktor.network.sockets.aSocket
+import io.ktor.network.sockets.awaitClosed
+import io.ktor.network.sockets.openReadChannel
+import io.ktor.network.sockets.openWriteChannel
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.CancellationException
-import kotlinx.coroutines.*
+import io.ktor.utils.io.writeFully
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
@@ -308,18 +327,19 @@ class TuyaConnection(
         }
     }
 
-    private fun cleanup() {
-        receiveJob?.cancel()
-        heartbeatJob?.cancel()
+    private suspend fun cleanup() {
+        withContext(NonCancellable) {
+            receiveJob?.cancel()
+            heartbeatJob?.cancel()
 
-        // Complete all pending responses with cancellation
-        pendingResponses.values.forEach { it.cancel() }
-        pendingResponses.clear()
+            // Complete all pending responses with cancellation
+            pendingResponses.values.forEach { it.cancel() }
+            pendingResponses.clear()
 
-        runBlocking {
             socket?.close()
+            socket?.awaitClosed()
+            socket = null
         }
-        socket = null
     }
 
     private fun ensureConnected() {
