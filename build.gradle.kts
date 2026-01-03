@@ -19,7 +19,7 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    testImplementation("org.slf4j:slf4j-simple:2.0.17")
+    testImplementation("ch.qos.logback:logback-classic:1.5.23")
 }
 
 tasks.test {

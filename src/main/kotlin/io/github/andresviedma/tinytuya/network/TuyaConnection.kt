@@ -63,11 +63,11 @@ class TuyaConnection(
     private val host: String,
     private val port: Int = 6668,
     private val deviceId: String,
-    private val cipher: TuyaCipher,
+    private var cipher: TuyaCipher,
     private val version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val connectionTimeout: Duration = 10.seconds,
-    private val responseTimeout: Duration = 5.seconds,
+    private val responseTimeout: Duration = 10.seconds,
     private val heartbeatInterval: Duration = 30.seconds
 ) {
     private val writeMutex: Mutex = Mutex()
@@ -77,7 +77,7 @@ class TuyaConnection(
     private var receiveJob: Job? = null
     private var heartbeatJob: Job? = null
 
-    private val sequenceNumber = AtomicInt(0)
+    private val sequenceNumber = AtomicInt(1)
     private val pendingResponses = mutableMapOf<Int, CompletableDeferred<TuyaMessage>>()
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -156,6 +156,7 @@ class TuyaConnection(
                 version = version,
                 deviceId = deviceId
             )
+            logger.debug { "Message: ${encoded.toHexString()}"}
 
             socket?.let { sock ->
                 writeMutex.withLock {
@@ -173,6 +174,7 @@ class TuyaConnection(
             pendingResponses.remove(messageWithSeq.sequenceNumber)
             throw TimeoutException("Timeout waiting for response to sequence ${messageWithSeq.sequenceNumber}")
         } catch (e: Exception) {
+            logger.error(e) { "Error sending message ${messageWithSeq.sequenceNumber}: ${e.message}" }
             pendingResponses.remove(messageWithSeq.sequenceNumber)
             throw e
         }
@@ -192,11 +194,14 @@ class TuyaConnection(
             message
         }
 
+        logger.debug { "Sending message ${messageWithSeq.sequenceNumber}: ${messageWithSeq.command}"}
+
         val encoded = messageWithSeq.encode(
             cipher = cipher,
             version = version,
             deviceId = deviceId
         )
+        logger.debug { "Message: ${encoded.toHexString()}"}
 
         socket?.let { sock ->
             val newWriteChannel = writeChannel ?: sock.openWriteChannel(autoFlush = true)
@@ -225,6 +230,7 @@ class TuyaConnection(
 
                 while (isActive && _connectionState.value == ConnectionState.Connected) {
                     try {
+                        logger.debug { "Listening..." }
                         val message = readMessage(input)
                         handleReceivedMessage(message)
                     } catch (e: CancellationException) {
@@ -295,6 +301,7 @@ class TuyaConnection(
     private fun handleReceivedMessage(message: TuyaMessage) {
         // Check if this is a response to a pending request
         val deferred = pendingResponses.remove(message.sequenceNumber)
+            ?: pendingResponses.keys.firstOrNull().also { logger.warn { "--- replying message $it" } }?.let { pendingResponses.remove(it) }
         if (deferred != null) {
             deferred.complete(message)
         } else {
@@ -360,6 +367,10 @@ class TuyaConnection(
             disconnect()
         }
         scope.cancel()
+    }
+
+    fun changeCipher(cipher: TuyaCipher) {
+        this.cipher = cipher
     }
 }
 

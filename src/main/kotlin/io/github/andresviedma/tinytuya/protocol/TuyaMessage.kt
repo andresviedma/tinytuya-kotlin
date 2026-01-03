@@ -30,16 +30,20 @@ data class TuyaMessage(
     val sequenceNumber: Int = 0,
     val returnCode: Int? = null,
 ) {
+    val payloadText: String get() = payload.toString(Charsets.UTF_8)
+
     /**
      * Encode the message to a byte array for transmission
      */
     fun encode(
         cipher: TuyaCipher? = null,
         version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
-        deviceId: String? = null
+        deviceId: String? = null,
     ): ByteArray {
         // Prepare payload
+        logger.debug { "Payload to send: ${payload.toString(Charsets.UTF_8)}" }
         val finalPayload = preparePayload(payload, cipher, version)
+        logger.debug { "Encrypted payload: " + finalPayload.toHexString() }
 
         // Build the message structure
         val prefix = PREFIX
@@ -60,7 +64,7 @@ data class TuyaMessage(
         // Calculate CRC over header + return code + payload
         val checksumData = concatByteArrays(header, finalPayload) // retCode, finalPayload)
         val checksum = if (version == TuyaProtocolVersion.V3_4)
-            checksumData.macSha256(cipher!!.localKey)
+            checksumData.macSha256(cipher!!.keyBytes)
         else
             checksumData.crc32Bytes()
 
@@ -182,7 +186,7 @@ data class TuyaMessage(
             // Parse header
             val sequenceNumber = data.toIntBE(4)
             val commandCode = data.toIntBE(8)
-            val payloadLength = data.toIntBE(12)
+            // val payloadLength = data.toIntBE(12)
             val returnCode = data.toIntBE(16)
 
             // Extract command
@@ -191,15 +195,27 @@ data class TuyaMessage(
 
             // Extract payload (excluding return code, CRC, and suffix)
             val payloadStart = 20  // After header and return code
-            val payloadEnd = data.size - 8  // Before CRC and suffix
+            val checksumSize = if (version == TuyaProtocolVersion.V3_4) 32 else 4
+            val payloadEnd = data.size - 4 - checksumSize  // Before checksum and suffix
             val encryptedPayload = data.copyOfRange(payloadStart, payloadEnd)
 
-            // Verify CRC
-            val receivedCrc = data.toIntBE(data.size - 8)
-            val calculatedCrcData = data.copyOfRange(0, data.size - 8)
-            val calculatedCrc = calculatedCrcData.crc32Bytes().toIntBE()
-            require(receivedCrc == calculatedCrc) {
-                "CRC mismatch: received 0x${receivedCrc.toString(16)}, calculated 0x${calculatedCrc.toString(16)}"
+            // Verify checksum
+            if (version == TuyaProtocolVersion.V3_4) {
+                // MAC SHA-256
+                val receivedChecksum = data.copyOfRange(payloadEnd, data.size - 4)
+                val calculatedMessage = data.copyOfRange(0, payloadEnd)
+                val calculatedChecksum = calculatedMessage.macSha256(cipher!!.keyBytes)
+                require(receivedChecksum.toHexString() == calculatedChecksum.toHexString()) {
+                    "MAC SHA256 mismatch: received 0x${receivedChecksum.toHexString()}, calculated 0x${calculatedChecksum.toHexString()}"
+                }
+            } else {
+                // CRC32
+                val receivedCrc = data.toIntBE(data.size - 8)
+                val calculatedCrcData = data.copyOfRange(0, data.size - 8)
+                val calculatedCrc = calculatedCrcData.crc32Bytes().toIntBE()
+                require(receivedCrc == calculatedCrc) {
+                    "CRC mismatch: received 0x${receivedCrc.toString(16)}, calculated 0x${calculatedCrc.toString(16)}"
+                }
             }
 
             // Decrypt payload
@@ -231,9 +247,11 @@ data class TuyaMessage(
                 TuyaProtocolVersion.V3_3, TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 -> {
                     // Version 3.3+: Remove version header and suffix
                     // Minimum size: 3 (header) + 16 (min encrypted block) + 16 (MD5 suffix) = 35 bytes
+                    /*
                     if (encryptedPayload.size < 35) {
                         return encryptedPayload
                     }
+                     */
 
                     // Check for version header
                     val versionHeader = String(encryptedPayload.copyOfRange(0, 3), Charsets.UTF_8)
