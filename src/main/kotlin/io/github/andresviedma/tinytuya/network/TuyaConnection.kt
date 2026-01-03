@@ -39,7 +39,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.incrementAndFetch
+import kotlin.concurrent.atomics.fetchAndIncrement
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -78,6 +78,7 @@ class TuyaConnection(
     private var heartbeatJob: Job? = null
 
     private val sequenceNumber = AtomicInt(1)
+    private var sequenceDelta: Int? = null
     private val pendingResponses = mutableMapOf<Int, CompletableDeferred<TuyaMessage>>()
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -189,6 +190,7 @@ class TuyaConnection(
         ensureConnected()
 
         val messageWithSeq = if (message.sequenceNumber == 0) {
+            sequenceDelta = sequenceDelta!! - 1
             message.copy(sequenceNumber = nextSequenceNumber())
         } else {
             message
@@ -300,8 +302,9 @@ class TuyaConnection(
 
     private fun handleReceivedMessage(message: TuyaMessage) {
         // Check if this is a response to a pending request
-        val deferred = pendingResponses.remove(message.sequenceNumber)
-            ?: pendingResponses.keys.firstOrNull().also { logger.warn { "--- replying message $it" } }?.let { pendingResponses.remove(it) }
+        val sourceSequenceNumber = sequenceDelta?.let { message.sequenceNumber - it }
+            ?: 1.also { sequenceDelta = message.sequenceNumber - 1 }
+        val deferred = pendingResponses.remove(sourceSequenceNumber)
         if (deferred != null) {
             deferred.complete(message)
         } else {
@@ -356,7 +359,7 @@ class TuyaConnection(
     }
 
     private fun nextSequenceNumber(): Int {
-        return sequenceNumber.incrementAndFetch()
+        return sequenceNumber.fetchAndIncrement()
     }
 
     /**
