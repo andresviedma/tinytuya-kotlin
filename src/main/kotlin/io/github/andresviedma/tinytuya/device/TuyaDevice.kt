@@ -65,6 +65,7 @@ open class TuyaDevice(
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+    var initialized: Boolean = false
 
     // Configuration
     var autoReconnect: Boolean = true
@@ -124,6 +125,12 @@ open class TuyaDevice(
 
         // Connect
         conn.connect()
+
+        // Wait for initialized
+        while (!initialized) {
+            delay(10)
+        }
+        logger.info { "Device $deviceId connected and initialized" }
 
         return this
     }
@@ -283,6 +290,8 @@ open class TuyaDevice(
         } catch (e: Exception) {
             // Ignore errors during initial refresh
         }
+
+        initialized = true
 
         // Start status polling if configured
         statusPollInterval?.let { interval ->
