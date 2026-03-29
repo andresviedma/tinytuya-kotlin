@@ -4,90 +4,104 @@ package io.github.andresviedma.tinytuya.protocol
  * Tuya protocol commands.
  * Each command represents a specific operation that can be performed with a Tuya device.
  */
-enum class TuyaCommand(val code: Int) {
+sealed class TuyaCommand(val code: Int) {
     /**
      * UDP discovery broadcast
      */
-    UDP(0x00),
+    data object UDP : TuyaCommand(0x00)
 
     /**
      * Access Point configuration
      */
-    AP_CONFIG(0x01),
+    data object AP_CONFIG : TuyaCommand(0x01)
 
     /**
      * Query device status
      */
-    STATUS(0x08),
+    data object STATUS : TuyaCommand(0x08)
 
     /**
      * Heartbeat / keep-alive
      */
-    HEART_BEAT(0x09),
+    data object HEART_BEAT : TuyaCommand(0x09)
 
     /**
-     * Query data points (DPS),
+     * Query data points (DPS)
      */
-    DP_QUERY(0x0a),
+    data object DP_QUERY : TuyaCommand(0x0a)
 
     /**
      * Query data points with timestamp
      */
-    DP_QUERY_NEW(0x10),
+    data object DP_QUERY_NEW : TuyaCommand(0x10)
 
     /**
-     * Control command (set DPS values),
+     * Control command (set DPS values)
      */
-    CONTROL(0x07),
+    data object CONTROL : TuyaCommand(0x07)
 
     /**
-     * Control command (newer protocol),
+     * Control command (newer protocol)
      */
-    CONTROL_NEW(0x0d),
+    data object CONTROL_NEW : TuyaCommand(0x0d)
 
     /**
      * Update DPS values
      */
-    DP_REFRESH(0x12),
+    data object DP_REFRESH : TuyaCommand(0x12)
 
     /**
-     * Update DPS (alternative),
+     * Update DPS (alternative)
      */
-    UPDATE_DPS(0x12),
+    data object UPDATE_DPS : TuyaCommand(0x12)
 
     /**
-     * Negotiate session key (protocol 3.4+),
+     * Negotiate session key (protocol 3.4+)
      */
-    SESS_KEY_NEG_START(0x03),
+    data object SESS_KEY_NEG_START : TuyaCommand(0x03)
 
     /**
-     * Session key negotiation response (protocol 3.4+),
+     * Session key negotiation response (protocol 3.4+)
      */
-    SESS_KEY_NEG_RESP(0x04),
+    data object SESS_KEY_NEG_RESP : TuyaCommand(0x04)
 
     /**
-     * Finish session key negotiation (protocol 3.4+),
+     * Finish session key negotiation (protocol 3.4+)
      */
-    SESS_KEY_NEG_FINISH(0x05),
+    data object SESS_KEY_NEG_FINISH : TuyaCommand(0x05)
 
     /**
      * Local network time query
      */
-    LAN_GW_ACTIVE(0x25),
+    data object LAN_GW_ACTIVE : TuyaCommand(0x25)
 
     /**
      * LAN extension command
      */
-    LAN_EXT_STREAM(0x40),
+    data object LAN_EXT_STREAM : TuyaCommand(0x40)
 
-    /**
-     * Scan devices result command
-     */
-    DISCOVER(0x13);
+    data object DISCOVER : TuyaCommand(0x13)
 
 
     companion object {
-        fun fromCode(code: Int): TuyaCommand? =
-            enumValues<TuyaCommand>().find { it.code == code }
+        fun fromCode(code: Int): TuyaCommand? = when (code) {
+            0x00 -> UDP
+            0x01 -> AP_CONFIG
+            0x07 -> CONTROL
+            0x08 -> STATUS
+            0x09 -> HEART_BEAT
+            0x0a -> DP_QUERY
+            0x0d -> CONTROL_NEW
+            0x10 -> DP_QUERY_NEW
+            0x12 -> DP_REFRESH
+            0x03 -> SESS_KEY_NEG_START
+            0x04 -> SESS_KEY_NEG_RESP
+            0x05 -> SESS_KEY_NEG_FINISH
+            0x25 -> LAN_GW_ACTIVE
+            0x40 -> LAN_EXT_STREAM
+
+            0x13 -> DISCOVER
+            else -> null
+        }
     }
 }

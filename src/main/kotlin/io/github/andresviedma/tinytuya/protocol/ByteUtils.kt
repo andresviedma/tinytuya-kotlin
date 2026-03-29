@@ -85,7 +85,7 @@ object ByteUtils {
     /**
      * XOR two byte arrays
      */
-    inline infix fun ByteArray.xor(other: ByteArray): ByteArray {
+    fun ByteArray.xor(other: ByteArray): ByteArray {
         require(this.size == other.size) { "Arrays must be same size for XOR" }
         return ByteArray(size) { i -> (this[i].toInt() xor other[i].toInt()).toByte() }
     }
@@ -124,14 +124,13 @@ object ByteUtils {
         return copyOfRange(0, size - paddingSize)
     }
 
-    fun ByteArray.macSha256(key: String): ByteArray =
-        macSha256(key.toByteArray(Charsets.UTF_8))
-
-    fun ByteArray.macSha256(keyBytes: ByteArray): ByteArray {
+    fun ByteArray.macSha256(key: ByteArray): ByteArray {
         val algorithm = "HmacSHA256"
-        val secretKeySpec = SecretKeySpec(keyBytes, algorithm)
+        val secretKeySpec = SecretKeySpec(key, algorithm)
         val mac: Mac = Mac.getInstance(algorithm)
         mac.init(secretKeySpec)
         return mac.doFinal(this)
     }
+
+    fun ByteArray.macSha256(key: String): ByteArray = macSha256(key.toByteArray())
 }

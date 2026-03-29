@@ -32,6 +32,8 @@ sealed class TuyaProtocolVersion(val version: String) {
 
     inline val numeric: Double get() = version.toDouble()
 
+    operator fun compareTo(other: TuyaProtocolVersion): Int = numeric.compareTo(other.numeric)
+
     companion object {
         fun fromString(version: String): TuyaProtocolVersion = when (version) {
             "3.1" -> V3_1

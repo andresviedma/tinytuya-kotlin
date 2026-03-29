@@ -4,9 +4,11 @@ import io.github.andresviedma.tinytuya.crypto.TuyaCipher
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.concatByteArrays
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.crc32Bytes
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.macSha256
+import io.github.andresviedma.tinytuya.protocol.ByteUtils.md5
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toBytesBE
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toIntBE
+import java.util.Base64
 import io.github.oshai.kotlinlogging.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
@@ -30,20 +32,16 @@ data class TuyaMessage(
     val sequenceNumber: Int = 0,
     val returnCode: Int? = null,
 ) {
-    val payloadText: String get() = payload.toString(Charsets.UTF_8)
-
     /**
      * Encode the message to a byte array for transmission
      */
     fun encode(
         cipher: TuyaCipher? = null,
         version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
-        deviceId: String? = null,
+        deviceId: String? = null
     ): ByteArray {
         // Prepare payload
-        logger.debug { "Payload to send: ${payload.toString(Charsets.UTF_8)}" }
         val finalPayload = preparePayload(payload, cipher, version)
-        logger.debug { "Encrypted payload: " + finalPayload.toHexString() }
 
         // Build the message structure
         val prefix = PREFIX
@@ -88,7 +86,22 @@ data class TuyaMessage(
 
             version == TuyaProtocolVersion.V3_1 ->
                 if (command == TuyaCommand.CONTROL) {
-                    error("CONTROL command encoding not implemented in message version 3.1")
+                    // Encrypt payload with AES-ECB + base64
+                    val encrypted = Base64.getEncoder().encode(cipher.encrypt(payload))
+                    // Compute MD5 of "data=<b64>||lpv=3.1||<localKey>"
+                    val preMd5 = concatByteArrays(
+                        "data=".toByteArray(),
+                        encrypted,
+                        "||lpv=3.1||".toByteArray(),
+                        cipher.keyBytes
+                    )
+                    val hexDigest = preMd5.md5().joinToString("") { "%02x".format(it) }
+                    // Prepend "3.1" + md5[8..23] (16 chars) + encrypted payload
+                    concatByteArrays(
+                        "3.1".toByteArray(),
+                        hexDigest.substring(8, 24).toByteArray(Charsets.ISO_8859_1),
+                        encrypted
+                    )
                 } else {
                     payload
                 }
@@ -186,33 +199,33 @@ data class TuyaMessage(
             // Parse header
             val sequenceNumber = data.toIntBE(4)
             val commandCode = data.toIntBE(8)
-            // val payloadLength = data.toIntBE(12)
+            val payloadLength = data.toIntBE(12)
             val returnCode = data.toIntBE(16)
 
             // Extract command
             val command = TuyaCommand.fromCode(commandCode)
                 ?: throw IllegalArgumentException("Unknown command code: 0x${commandCode.toString(16)}")
 
-            // Extract payload (excluding return code, CRC, and suffix)
+            // Extract payload (excluding return code, integrity field, and suffix)
             val payloadStart = 20  // After header and return code
-            val checksumSize = if (version == TuyaProtocolVersion.V3_4) 32 else 4
-            val payloadEnd = data.size - 4 - checksumSize  // Before checksum and suffix
+            // v3.4 uses 32-byte HMAC + 4-byte suffix; others use 4-byte CRC + 4-byte suffix
+            val integritySize = if (version == TuyaProtocolVersion.V3_4) 32 else 4
+            val payloadEnd = data.size - integritySize - 4  // Before integrity field and suffix
             val encryptedPayload = data.copyOfRange(payloadStart, payloadEnd)
 
-            // Verify checksum
+            // Verify integrity: HMAC-SHA256 for v3.4, CRC32 for all others
+            val integrityDataEnd = if (version == TuyaProtocolVersion.V3_4) data.size - 36 else data.size - 8
+            val integrityData = data.copyOfRange(0, integrityDataEnd)
             if (version == TuyaProtocolVersion.V3_4) {
-                // MAC SHA-256
-                val receivedChecksum = data.copyOfRange(payloadEnd, data.size - 4)
-                val calculatedMessage = data.copyOfRange(0, payloadEnd)
-                val calculatedChecksum = calculatedMessage.macSha256(cipher!!.keyBytes)
-                require(receivedChecksum.toHexString() == calculatedChecksum.toHexString()) {
-                    "MAC SHA256 mismatch: received 0x${receivedChecksum.toHexString()}, calculated 0x${calculatedChecksum.toHexString()}"
+                require(cipher != null) { "Cipher required for v3.4 integrity check" }
+                val receivedHmac = data.copyOfRange(data.size - 36, data.size - 4)
+                val calculatedHmac = integrityData.macSha256(cipher.keyBytes)
+                require(receivedHmac.contentEquals(calculatedHmac)) {
+                    "HMAC mismatch for v3.4 message"
                 }
             } else {
-                // CRC32
                 val receivedCrc = data.toIntBE(data.size - 8)
-                val calculatedCrcData = data.copyOfRange(0, data.size - 8)
-                val calculatedCrc = calculatedCrcData.crc32Bytes().toIntBE()
+                val calculatedCrc = integrityData.crc32Bytes().toIntBE()
                 require(receivedCrc == calculatedCrc) {
                     "CRC mismatch: received 0x${receivedCrc.toString(16)}, calculated 0x${calculatedCrc.toString(16)}"
                 }
@@ -241,34 +254,56 @@ data class TuyaMessage(
 
             return when (version) {
                 TuyaProtocolVersion.V3_1 -> {
-                    // Version 3.1: Simple decryption
-                    cipher.decrypt(encryptedPayload)
-                }
-                TuyaProtocolVersion.V3_3, TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 -> {
-                    // Version 3.3+: Remove version header and suffix
-                    // Minimum size: 3 (header) + 16 (min encrypted block) + 16 (MD5 suffix) = 35 bytes
-                    /*
-                    if (encryptedPayload.size < 35) {
-                        return encryptedPayload
-                    }
-                     */
-
-                    // Check for version header
-                    val versionHeader = String(encryptedPayload.copyOfRange(0, 3), Charsets.UTF_8)
-                    if (versionHeader == "3.3") {
-                        // Remove version header (3 bytes) and suffix (16 bytes - MD5 hash)
-                        val encryptedData = encryptedPayload.copyOfRange(3, encryptedPayload.size - 16)
-                        cipher.decrypt(encryptedData)
+                    // v3.1 responses: if starts with "3.1", strip it + 16-byte MD5 slice, then decrypt
+                    if (encryptedPayload.size >= 19 &&
+                        encryptedPayload.copyOfRange(0, 3).contentEquals("3.1".toByteArray())) {
+                        cipher.decrypt(encryptedPayload.copyOfRange(19, encryptedPayload.size))
                     } else {
-                        // No version header, decrypt as-is
-                        cipher.decrypt(encryptedPayload)
+                        encryptedPayload // plaintext (status responses)
                     }
                 }
-                else -> {
-                    // Default: simple decryption
-                    cipher.decrypt(encryptedPayload)
+                TuyaProtocolVersion.V3_2, TuyaProtocolVersion.V3_3 -> {
+                    // v3.2/3.3 responses: optional version header (15 bytes: 3 + 12 zeros) then encrypted data
+                    val headerLen = 15
+                    val stripped = if (encryptedPayload.size >= headerLen + 1 &&
+                        encryptedPayload[0] == '3'.code.toByte()) {
+                        encryptedPayload.copyOfRange(headerLen, encryptedPayload.size)
+                    } else {
+                        encryptedPayload
+                    }
+                    val decrypted = cipher.decrypt(stripped)
+                    // Strip source header: 24-byte "3.xCCCCCCCCSSSSSSSSUUUUUUUU" prefix if present
+                    stripSourceHeader(decrypted, version)
                 }
+                TuyaProtocolVersion.V3_4 -> {
+                    // v3.4: entire payload (including version header) is AES-ECB encrypted together
+                    val decrypted = cipher.decrypt(encryptedPayload)
+                    // After decryption, strip version header (15 bytes: "3.4" + 12 zeros)
+                    val stripped = if (decrypted.size >= 15 &&
+                        decrypted.copyOfRange(0, 3).contentEquals("3.4".toByteArray())) {
+                        decrypted.copyOfRange(15, decrypted.size)
+                    } else {
+                        decrypted
+                    }
+                    stripSourceHeader(stripped, version)
+                }
+                else -> encryptedPayload
             }
+        }
+
+        /**
+         * Strip the 24-byte source header "3.xCCCCCCCCSSSSSSSSUUUUUUUU" from decrypted v3.3+ responses.
+         * The header is present on STATUS/update responses but not on all messages.
+         */
+        private fun stripSourceHeader(data: ByteArray, version: TuyaProtocolVersion): ByteArray {
+            val sourceHeaderLen = 24
+            if (data.size > sourceHeaderLen &&
+                data[0] == '3'.code.toByte() &&
+                data[1] == '.'.code.toByte() &&
+                data[2] == version.version[2].code.toByte()) {
+                return data.copyOfRange(sourceHeaderLen, data.size)
+            }
+            return data
         }
 
         /**

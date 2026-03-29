@@ -17,6 +17,7 @@ import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.CancellationException
 import io.ktor.utils.io.writeFully
+import java.security.SecureRandom
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +40,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.fetchAndIncrement
+import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -63,22 +64,28 @@ class TuyaConnection(
     private val host: String,
     private val port: Int = 6668,
     private val deviceId: String,
-    private var cipher: TuyaCipher,
+    private val cipher: TuyaCipher,
     private val version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val connectionTimeout: Duration = 10.seconds,
-    private val responseTimeout: Duration = 10.seconds,
+    private val responseTimeout: Duration = 5.seconds,
     private val heartbeatInterval: Duration = 30.seconds
 ) {
     private val writeMutex: Mutex = Mutex()
 
+    // The cipher passed in is the real local-key cipher and never changes.
+    // activeCipher starts as the same value but is replaced with a session-key cipher
+    // after a successful v3.4/v3.5 handshake.
+    private val realCipher: TuyaCipher = cipher
+    private var activeCipher: TuyaCipher = cipher
+
     private var socket: Socket? = null
     private var writeChannel: ByteWriteChannel? = null
+    private var openedReadChannel: ByteReadChannel? = null
     private var receiveJob: Job? = null
     private var heartbeatJob: Job? = null
 
-    private val sequenceNumber = AtomicInt(1)
-    private var sequenceDelta: Int? = null
+    private val sequenceNumber = AtomicInt(0)
     private val pendingResponses = mutableMapOf<Int, CompletableDeferred<TuyaMessage>>()
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -104,6 +111,15 @@ class TuyaConnection(
                 socket = aSocket(selectorManager)
                     .tcp()
                     .connect(host, port)
+
+                // For v3.4+ run the session key handshake before the receive loop starts.
+                // The handshake reads/writes directly on the socket channel.
+                if (version >= TuyaProtocolVersion.V3_4) {
+                    val input = socket!!.openReadChannel()
+                    negotiateSessionKey(input)
+                    // Store the read channel so startReceiving() reuses it
+                    openedReadChannel = input
+                }
 
                 _connectionState.value = ConnectionState.Connected
 
@@ -153,11 +169,10 @@ class TuyaConnection(
 
             // Encode and send
             val encoded = messageWithSeq.encode(
-                cipher = cipher,
+                cipher = activeCipher,
                 version = version,
                 deviceId = deviceId
             )
-            logger.debug { "Message: ${encoded.toHexString()}"}
 
             socket?.let { sock ->
                 writeMutex.withLock {
@@ -175,7 +190,6 @@ class TuyaConnection(
             pendingResponses.remove(messageWithSeq.sequenceNumber)
             throw TimeoutException("Timeout waiting for response to sequence ${messageWithSeq.sequenceNumber}")
         } catch (e: Exception) {
-            logger.error(e) { "Error sending message ${messageWithSeq.sequenceNumber}: ${e.message}" }
             pendingResponses.remove(messageWithSeq.sequenceNumber)
             throw e
         }
@@ -190,20 +204,16 @@ class TuyaConnection(
         ensureConnected()
 
         val messageWithSeq = if (message.sequenceNumber == 0) {
-            sequenceDelta = sequenceDelta!! - 1
             message.copy(sequenceNumber = nextSequenceNumber())
         } else {
             message
         }
 
-        logger.debug { "Sending message ${messageWithSeq.sequenceNumber}: ${messageWithSeq.command}"}
-
         val encoded = messageWithSeq.encode(
-            cipher = cipher,
+            cipher = activeCipher,
             version = version,
             deviceId = deviceId
         )
-        logger.debug { "Message: ${encoded.toHexString()}"}
 
         socket?.let { sock ->
             val newWriteChannel = writeChannel ?: sock.openWriteChannel(autoFlush = true)
@@ -225,14 +235,82 @@ class TuyaConnection(
         return send(heartbeat)
     }
 
+    /**
+     * Perform the 3-way session key negotiation for v3.4/v3.5.
+     * Reads/writes directly on the socket before the receive loop starts.
+     * On success, replaces [activeCipher] with one built from the derived session key.
+     */
+    private suspend fun negotiateSessionKey(input: ByteReadChannel) {
+        val clientNonce = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        logger.debug { "Session key negotiation starting, clientNonce=${clientNonce.toHexString()}" }
+
+        // Step 1 — send SESS_KEY_NEG_START with the client nonce
+        val step1 = TuyaMessage(
+            command = TuyaCommand.SESS_KEY_NEG_START,
+            payload = clientNonce,
+            sequenceNumber = nextSequenceNumber(),
+        )
+        writeMutex.withLock {
+            writeChannel().writeFully(step1.encode(cipher = realCipher, version = version))
+        }
+
+        // Step 2 — read SESS_KEY_NEG_RESP from device
+        // Use realCipher for decoding the frame; parseStep2 handles the inner decryption.
+        val step2Frame = readRawMessage(input, realCipher)
+        require(step2Frame.command == TuyaCommand.SESS_KEY_NEG_RESP) {
+            "Expected SESS_KEY_NEG_RESP (0x04), got ${step2Frame.command}"
+        }
+        val deviceNonce = SessionKeyNegotiation.parseStep2(
+            step2Payload = step2Frame.payload,
+            realCipher   = realCipher,
+            clientNonce  = clientNonce,
+            version      = version,
+        )
+        logger.debug { "Session key negotiation step 2 ok, deviceNonce=${deviceNonce.toHexString()}" }
+
+        // Step 3 — send SESS_KEY_NEG_FINISH with HMAC(realKey, deviceNonce)
+        val step3Payload = SessionKeyNegotiation.buildStep3(deviceNonce, realCipher)
+        val step3 = TuyaMessage(
+            command = TuyaCommand.SESS_KEY_NEG_FINISH,
+            payload = step3Payload,
+            sequenceNumber = nextSequenceNumber(),
+        )
+        writeMutex.withLock {
+            writeChannel().writeFully(step3.encode(cipher = realCipher, version = version))
+        }
+
+        // Derive and install the session key
+        val sessionKey = SessionKeyNegotiation.deriveSessionKey(
+            clientNonce = clientNonce,
+            deviceNonce = deviceNonce,
+            realCipher  = realCipher,
+            version     = version,
+        )
+        activeCipher = TuyaCipher(sessionKey)
+        logger.debug { "Session key negotiation complete, sessionKey=${sessionKey.toHexString()}" }
+    }
+
+    /**
+     * Read one complete message from [input] using [cipherForDecode], without touching
+     * [pendingResponses]. Used exclusively during the handshake before the receive loop starts.
+     */
+    private suspend fun readRawMessage(input: ByteReadChannel, cipherForDecode: TuyaCipher): TuyaMessage {
+        val prefix = ByteArray(4).also { input.readFully(it, 0, 4) }
+        val header = ByteArray(12).also { input.readFully(it, 0, 12) }
+        val payloadLength = header.toIntBE(8)
+        val remaining = ByteArray(payloadLength).also { input.readFully(it, 0, payloadLength) }
+        val fullMessage = prefix + header + remaining
+        return TuyaMessage.decode(data = fullMessage, cipher = cipherForDecode, version = version)
+    }
+
     private fun startReceiving() {
         receiveJob = scope.launch {
             try {
-                val input = socket?.openReadChannel() ?: return@launch
+                // Reuse the channel opened during handshake (if any) to avoid opening a second one
+                val input = openedReadChannel ?: socket?.openReadChannel() ?: return@launch
 
                 while (isActive && _connectionState.value == ConnectionState.Connected) {
                     try {
-                        logger.debug { "Listening..." }
                         val message = readMessage(input)
                         handleReceivedMessage(message)
                     } catch (e: CancellationException) {
@@ -295,16 +373,14 @@ class TuyaConnection(
         // Decode message
         return TuyaMessage.decode(
             data = fullMessage,
-            cipher = cipher,
+            cipher = activeCipher,
             version = version
         )
     }
 
     private fun handleReceivedMessage(message: TuyaMessage) {
         // Check if this is a response to a pending request
-        val sourceSequenceNumber = sequenceDelta?.let { message.sequenceNumber - it }
-            ?: 1.also { sequenceDelta = message.sequenceNumber - 1 }
-        val deferred = pendingResponses.remove(sourceSequenceNumber)
+        val deferred = pendingResponses.remove(message.sequenceNumber)
         if (deferred != null) {
             deferred.complete(message)
         } else {
@@ -349,6 +425,8 @@ class TuyaConnection(
             socket?.close()
             socket?.awaitClosed()
             socket = null
+            openedReadChannel = null
+            activeCipher = realCipher  // reset so next connect() starts a fresh handshake
         }
     }
 
@@ -359,7 +437,7 @@ class TuyaConnection(
     }
 
     private fun nextSequenceNumber(): Int {
-        return sequenceNumber.fetchAndIncrement()
+        return sequenceNumber.incrementAndFetch()
     }
 
     /**
@@ -370,10 +448,6 @@ class TuyaConnection(
             disconnect()
         }
         scope.cancel()
-    }
-
-    fun changeCipher(cipher: TuyaCipher) {
-        this.cipher = cipher
     }
 }
 

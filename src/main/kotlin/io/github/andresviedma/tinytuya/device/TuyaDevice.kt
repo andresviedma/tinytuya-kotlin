@@ -2,34 +2,14 @@ package io.github.andresviedma.tinytuya.device
 
 import io.github.andresviedma.tinytuya.crypto.TuyaCipher
 import io.github.andresviedma.tinytuya.model.DeviceStatus
-import io.github.andresviedma.tinytuya.network.ConnectionState
-import io.github.andresviedma.tinytuya.network.RetryPolicy
-import io.github.andresviedma.tinytuya.network.TuyaConnection
-import io.github.andresviedma.tinytuya.network.withRetry
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.macSha256
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
-import io.github.andresviedma.tinytuya.protocol.ByteUtils.xor
+import io.github.andresviedma.tinytuya.network.*
 import io.github.andresviedma.tinytuya.protocol.TuyaCommand
 import io.github.andresviedma.tinytuya.protocol.TuyaMessage
 import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
 import io.github.oshai.kotlinlogging.KotlinLogging
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import kotlinx.serialization.json.*
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -39,20 +19,19 @@ private val logger = KotlinLogging.logger {}
  * Base class for Tuya devices providing high-level control and status operations.
  *
  * @param deviceId The device ID (gwId)
- * @param deviceLocalKey The local encryption key
+ * @param localKey The local encryption key
  * @param host The device IP address
  * @param port The device port (default: 6668)
  * @param version The protocol version (default: 3.3)
  */
 open class TuyaDevice(
     val deviceId: String,
-    val deviceLocalKey: String,
+    val localKey: String,
     val host: String,
     val port: Int = 6668,
     val version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
 ): AutoCloseable {
-    private var sessionKey: ByteArray = deviceLocalKey.toByteArray(Charsets.UTF_8)
-    protected var cipher = TuyaCipher(sessionKey)
+    protected val cipher = TuyaCipher(localKey)
     protected val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var connection: TuyaConnection? = null
@@ -65,7 +44,6 @@ open class TuyaDevice(
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
-    var initialized: Boolean = false
 
     // Configuration
     var autoReconnect: Boolean = true
@@ -126,11 +104,10 @@ open class TuyaDevice(
         // Connect
         conn.connect()
 
-        // Wait for initialized
-        while (!initialized) {
-            delay(10)
+        // Start status polling if configured
+        statusPollInterval?.let { interval ->
+            startStatusPolling(interval)
         }
-        logger.info { "Device $deviceId connected and initialized" }
 
         return this
     }
@@ -156,21 +133,13 @@ open class TuyaDevice(
     suspend fun refresh(): DeviceStatus {
         val conn = ensureConnected()
 
-        val message = when (version) {
-            TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
-                TuyaMessage.createWithJsonPayload(
-                    command = TuyaCommand.DP_QUERY_NEW,
-                    json = "{}"
-                )
-            else ->
-                TuyaMessage.createWithJsonPayload(
-                    command = TuyaCommand.DP_QUERY,
-                    json = buildJsonObject {
-                        put("gwId", deviceId)
-                        put("devId", deviceId)
-                    }.toString()
-                )
-        }
+        val message = TuyaMessage.createWithJsonPayload(
+            command = TuyaCommand.DP_QUERY,
+            json = buildJsonObject {
+                put("gwId", deviceId)
+                put("devId", deviceId)
+            }.toString()
+        )
 
         val response = withRetry(RetryPolicy.STANDARD) {
             conn.send(message)
@@ -187,29 +156,16 @@ open class TuyaDevice(
     suspend fun setDps(dps: Map<String, JsonElement>): DeviceStatus {
         val conn = ensureConnected()
 
-        val message = when (version) {
-            TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
-                TuyaMessage.createWithJsonPayload(
-                    command = TuyaCommand.CONTROL_NEW,
-                    json = buildJsonObject {
-                        put("protocol", 5)
-                        put("t", (System.currentTimeMillis() / 1000))
-                        put("data", JsonObject(mapOf("dps" to JsonObject(dps))))
-                    }.toString(),
-                )
-
-            else ->
-                TuyaMessage.createWithJsonPayload(
-                    command = TuyaCommand.CONTROL,
-                    json = buildJsonObject {
-                        put("devId", deviceId)
-                        put("uid", deviceId)
-                        // put("uid", "")
-                        put("t", (System.currentTimeMillis() / 1000).toString())
-                        put("dps", JsonObject(dps))
-                    }.toString(),
-                )
-        }
+        val message = TuyaMessage.createWithJsonPayload(
+            command = TuyaCommand.CONTROL,
+            json = buildJsonObject {
+                put("devId", deviceId)
+                put("uid", deviceId)
+                // put("uid", "")
+                put("t", (System.currentTimeMillis() / 1000).toString())
+                put("dps", JsonObject(dps))
+            }.toString()
+        )
         logger.debug { message.payload.toString(Charsets.UTF_8) }
 
         withRetry(RetryPolicy.STANDARD) {
@@ -282,20 +238,11 @@ open class TuyaDevice(
      * Called when connection is established
      */
     protected open suspend fun onConnected() {
-        negotiateSessionKey()
-
         // Default: refresh status
         try {
             refresh()
         } catch (e: Exception) {
             // Ignore errors during initial refresh
-        }
-
-        initialized = true
-
-        // Start status polling if configured
-        statusPollInterval?.let { interval ->
-            startStatusPolling(interval)
         }
     }
 
@@ -367,7 +314,6 @@ open class TuyaDevice(
                     refresh()
                 } catch (e: Exception) {
                     // Ignore polling errors
-                    logger.warn { "Error refreshing status: ${e.message}" }
                 }
             }
         }
@@ -386,50 +332,5 @@ open class TuyaDevice(
             disconnect()
         }
         scope.cancel()
-    }
-
-    private suspend fun negotiateSessionKey() {
-        if (version.numeric <= 3.3) return
-
-        val conn = ensureConnected()
-
-        val localNonce = "0123456789abcdef" // not-so-random random key
-        logger.info { "Session key negotiate start for device $deviceId" }
-
-        // 1. First message
-        val message = TuyaMessage.createWithJsonPayload(
-            command = TuyaCommand.SESS_KEY_NEG_START,
-            json = localNonce,
-        )
-        val response = conn.send(message)
-
-        // 2. Validate response
-        require(response.command == TuyaCommand.SESS_KEY_NEG_RESP) { "Invalid response received in session negotiation: ${response.command}" }
-        require(response.payload.size >= 48) { "Session key negotiation step 2 failed, too short response" }
-
-        val remoteNonce = response.payload.copyOfRange(0, 16).toString(Charsets.UTF_8)
-        val hmacChecksum = response.payload.copyOfRange(16, 48).toHexString()
-        val hmacCheck = localNonce.toByteArray(Charsets.UTF_8).macSha256(sessionKey).toHexString()
-        require(hmacCheck == hmacChecksum) { "Session key negotiation step 2 failed HMAC check! wanted=$hmacChecksum but got=$hmacCheck" }
-
-        val rkeyHmac = remoteNonce.toByteArray(Charsets.UTF_8).macSha256(sessionKey)
-        logger.debug { "Negotiation. Remote nonce: ${remoteNonce.toByteArray().toHexString()} -- ${rkeyHmac.toHexString()}" }
-
-        // 3. Second message
-        val finishMessage = TuyaMessage(
-            command = TuyaCommand.SESS_KEY_NEG_FINISH,
-            payload = rkeyHmac,
-        )
-        conn.sendNoResponse(finishMessage)
-
-        // Change the local key
-        val newLocalKey0 = localNonce.toByteArray() xor remoteNonce.toByteArray()
-        val newLocalKey = cipher.encrypt(newLocalKey0).copyOfRange(0, 16)
-
-        sessionKey = newLocalKey
-        cipher = TuyaCipher(newLocalKey)
-        conn.changeCipher(cipher)
-
-        logger.info { "Session key negotiate success. Session key: ${newLocalKey.toHexString()}" }
     }
 }
