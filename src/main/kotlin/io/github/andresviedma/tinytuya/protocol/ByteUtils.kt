@@ -85,7 +85,7 @@ object ByteUtils {
     /**
      * XOR two byte arrays
      */
-    fun ByteArray.xor(other: ByteArray): ByteArray {
+    inline infix fun ByteArray.xor(other: ByteArray): ByteArray {
         require(this.size == other.size) { "Arrays must be same size for XOR" }
         return ByteArray(size) { i -> (this[i].toInt() xor other[i].toInt()).toByte() }
     }

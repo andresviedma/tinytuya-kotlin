@@ -8,8 +8,8 @@ import io.github.andresviedma.tinytuya.protocol.ByteUtils.md5
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toBytesBE
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toIntBE
-import java.util.Base64
 import io.github.oshai.kotlinlogging.KotlinLogging
+import java.util.Base64
 
 private val logger = KotlinLogging.logger {}
 
@@ -32,6 +32,8 @@ data class TuyaMessage(
     val sequenceNumber: Int = 0,
     val returnCode: Int? = null,
 ) {
+    val payloadText: String get() = payload.toString(Charsets.UTF_8)
+
     /**
      * Encode the message to a byte array for transmission
      */
@@ -41,7 +43,9 @@ data class TuyaMessage(
         deviceId: String? = null
     ): ByteArray {
         // Prepare payload
+        logger.debug { "Payload to send: ${payload.toString(Charsets.UTF_8)}" }
         val finalPayload = preparePayload(payload, cipher, version)
+        logger.debug { "Encrypted payload: " + finalPayload.toHexString() }
 
         // Build the message structure
         val prefix = PREFIX
@@ -201,6 +205,7 @@ data class TuyaMessage(
             val commandCode = data.toIntBE(8)
             val payloadLength = data.toIntBE(12)
             val returnCode = data.toIntBE(16)
+            logger.warn { "****** RETURN CODE $returnCode" }
 
             // Extract command
             val command = TuyaCommand.fromCode(commandCode)

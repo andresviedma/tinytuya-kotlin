@@ -14,12 +14,18 @@ import javax.crypto.spec.SecretKeySpec
 class TuyaCipher private constructor(val localKey: String, val keyBytes: ByteArray) {
 
     constructor(localKey: String, forceMd5: Boolean = false) : this(
-        localKey,
-        if (localKey.length == 16 && !forceMd5) localKey.toByteArray(Charsets.UTF_8)
-        else localKey.toByteArray(Charsets.UTF_8).md5()
+        localKey = localKey,
+
+        // Convert local key to 16-byte key
+        keyBytes = if (localKey.length == 16 && !forceMd5) {
+            localKey.toByteArray(Charsets.UTF_8)
+        } else {
+            // If key is not 16 bytes, use MD5 hash
+            localKey.toByteArray(Charsets.UTF_8).md5()
+        }
     )
 
-    constructor(keyBytes: ByteArray) : this("", keyBytes)
+    constructor(keyBytes: ByteArray) : this(localKey = "", keyBytes = keyBytes)
 
     init {
         // Ensure BouncyCastle provider is registered

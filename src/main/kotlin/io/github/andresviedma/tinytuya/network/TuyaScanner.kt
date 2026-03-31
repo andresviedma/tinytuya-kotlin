@@ -6,12 +6,29 @@ import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
 import io.github.andresviedma.tinytuya.protocol.TuyaMessage
 import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
 import io.github.oshai.kotlinlogging.KotlinLogging
-import io.ktor.network.selector.*
-import io.ktor.network.sockets.*
-import io.ktor.utils.io.core.*
-import kotlinx.coroutines.*
+import io.ktor.network.selector.SelectorManager
+import io.ktor.network.sockets.InetSocketAddress
+import io.ktor.network.sockets.SocketAddress
+import io.ktor.network.sockets.aSocket
+import io.ktor.network.sockets.toJavaAddress
+import io.ktor.utils.io.core.readBytes
+import io.ktor.utils.io.core.toByteArray
+import io.ktor.utils.io.core.use
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import kotlinx.serialization.json.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -70,6 +87,14 @@ class TuyaScanner(
         collectorJob.cancel()
 
         return discoveredDevices.values.toList()
+    }
+
+    fun getDiscoveredDevice(deviceId: String): DiscoveredDevice? =
+        discoveredDevices.values.find { it.gwId == deviceId }
+
+    suspend fun discoverDevice(deviceId: String): DiscoveredDevice? {
+        scan()
+        return getDiscoveredDevice(deviceId)
     }
 
     /**

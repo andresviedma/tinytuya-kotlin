@@ -2,14 +2,33 @@ package io.github.andresviedma.tinytuya.device
 
 import io.github.andresviedma.tinytuya.crypto.TuyaCipher
 import io.github.andresviedma.tinytuya.model.DeviceStatus
-import io.github.andresviedma.tinytuya.network.*
+import io.github.andresviedma.tinytuya.model.DiscoveredDevice
+import io.github.andresviedma.tinytuya.model.TuyaClientException
+import io.github.andresviedma.tinytuya.network.ConnectionState
+import io.github.andresviedma.tinytuya.network.RetryPolicy
+import io.github.andresviedma.tinytuya.network.TuyaConnection
+import io.github.andresviedma.tinytuya.network.withRetry
 import io.github.andresviedma.tinytuya.protocol.TuyaCommand
 import io.github.andresviedma.tinytuya.protocol.TuyaMessage
 import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
 import io.github.oshai.kotlinlogging.KotlinLogging
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
-import kotlinx.serialization.json.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -44,11 +63,19 @@ open class TuyaDevice(
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+    var initialized: Boolean = false
 
     // Configuration
     var autoReconnect: Boolean = true
     var reconnectDelay: Duration = 5.seconds
     var statusPollInterval: Duration? = null // null = no polling
+
+    constructor(discoveredDevice: DiscoveredDevice, productKey: String) : this(
+        deviceId = discoveredDevice.gwId,
+        localKey = productKey,
+        host = discoveredDevice.ip,
+        version = discoveredDevice.version,
+    )
 
     /**
      * Connect to the device
@@ -104,10 +131,16 @@ open class TuyaDevice(
         // Connect
         conn.connect()
 
-        // Start status polling if configured
-        statusPollInterval?.let { interval ->
-            startStatusPolling(interval)
+        // Wait for initialized
+        while (!initialized) {
+            delay(10)
+
+            // Start status polling if configured
+            statusPollInterval?.let { interval ->
+                startStatusPolling(interval)
+            }
         }
+        logger.info { "Device $deviceId connected and initialized" }
 
         return this
     }
@@ -131,46 +164,71 @@ open class TuyaDevice(
      * Query the current device status
      */
     suspend fun refresh(): DeviceStatus {
-        val conn = ensureConnected()
+        ensureConnected()
 
-        val message = TuyaMessage.createWithJsonPayload(
-            command = TuyaCommand.DP_QUERY,
-            json = buildJsonObject {
-                put("gwId", deviceId)
-                put("devId", deviceId)
-            }.toString()
-        )
-
-        val response = withRetry(RetryPolicy.STANDARD) {
-            conn.send(message)
+        val message = when (version) {
+            TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
+                TuyaMessage.createWithJsonPayload(
+                    command = TuyaCommand.DP_QUERY_NEW,
+                    json = "{}"
+                )
+            else ->
+                TuyaMessage.createWithJsonPayload(
+                    command = TuyaCommand.DP_QUERY,
+                    json = buildJsonObject {
+                        put("gwId", deviceId)
+                        put("devId", deviceId)
+                    }.toString()
+                )
         }
 
-        val newStatus = parseStatus(response)
-        _status.value = newStatus
-        return newStatus
+        return try {
+            val response = sendMessage(message)
+            val newStatus = parseStatus(response)
+            _status.value = newStatus
+            newStatus
+        } catch (e: TuyaClientException) {
+            if (e.response.returnCode == 1 && e.response.payloadText == "json obj data unvalid") {
+                DeviceStatus(emptyMap())
+            } else {
+                throw e
+            }
+        }
     }
 
     /**
      * Set data point values
      */
     suspend fun setDps(dps: Map<String, JsonElement>): DeviceStatus {
-        val conn = ensureConnected()
+        ensureConnected()
 
-        val message = TuyaMessage.createWithJsonPayload(
-            command = TuyaCommand.CONTROL,
-            json = buildJsonObject {
-                put("devId", deviceId)
-                put("uid", deviceId)
-                // put("uid", "")
-                put("t", (System.currentTimeMillis() / 1000).toString())
-                put("dps", JsonObject(dps))
-            }.toString()
-        )
+        val message = when (version) {
+            TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
+                TuyaMessage.createWithJsonPayload(
+                    command = TuyaCommand.CONTROL_NEW,
+                    json = buildJsonObject {
+                        put("protocol", 5)
+                        put("t", (System.currentTimeMillis() / 1000))
+                        put("data", JsonObject(mapOf("dps" to JsonObject(dps))))
+                    }.toString(),
+                )
+
+            else ->
+                TuyaMessage.createWithJsonPayload(
+                    command = TuyaCommand.CONTROL,
+                    json = buildJsonObject {
+                        put("devId", deviceId)
+                        put("uid", deviceId)
+                        // put("uid", "")
+                        put("t", (System.currentTimeMillis() / 1000).toString())
+                        put("dps", JsonObject(dps))
+                    }.toString(),
+                )
+        }
+
         logger.debug { message.payload.toString(Charsets.UTF_8) }
 
-        withRetry(RetryPolicy.STANDARD) {
-            conn.send(message)
-        }
+        sendMessage(message)
 
         // Update local status
         val updatedDps = _status.value.dps.toMutableMap()
@@ -179,6 +237,15 @@ open class TuyaDevice(
         _status.value = newStatus
 
         return newStatus
+    }
+
+    private suspend fun sendMessage(message: TuyaMessage): TuyaMessage {
+        val conn = ensureConnected()
+        val response = withRetry(RetryPolicy.STANDARD) {
+            conn.send(message)
+        }
+        if (response.returnCode != 0) throw TuyaClientException(response)
+        return response
     }
 
     /**
@@ -243,6 +310,13 @@ open class TuyaDevice(
             refresh()
         } catch (e: Exception) {
             // Ignore errors during initial refresh
+        }
+
+        initialized = true
+
+        // Start status polling if configured
+        statusPollInterval?.let { interval ->
+            startStatusPolling(interval)
         }
     }
 
@@ -314,7 +388,7 @@ open class TuyaDevice(
                     refresh()
                 } catch (e: Exception) {
                     // Ignore polling errors
-                }
+                    logger.warn { "Error refreshing status: ${e.message}" }                }
             }
         }
     }
@@ -334,3 +408,5 @@ open class TuyaDevice(
         scope.cancel()
     }
 }
+
+fun DiscoveredDevice.device(productKey: String) = TuyaDevice(this, productKey)
