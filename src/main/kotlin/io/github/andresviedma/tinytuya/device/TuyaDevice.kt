@@ -5,6 +5,7 @@ import io.github.andresviedma.tinytuya.model.DeviceStatus
 import io.github.andresviedma.tinytuya.model.DiscoveredDevice
 import io.github.andresviedma.tinytuya.model.TuyaClientException
 import io.github.andresviedma.tinytuya.network.ConnectionState
+import io.github.andresviedma.tinytuya.network.DeviceConnectionConfig
 import io.github.andresviedma.tinytuya.network.RetryPolicy
 import io.github.andresviedma.tinytuya.network.TuyaConnection
 import io.github.andresviedma.tinytuya.network.withRetry
@@ -35,22 +36,12 @@ import kotlin.time.Duration.Companion.seconds
 private val logger = KotlinLogging.logger {}
 
 /**
- * Base class for Tuya devices providing high-level control and status operations.
- *
- * @param deviceId The device ID (gwId)
- * @param localKey The local encryption key
- * @param host The device IP address
- * @param port The device port (default: 6668)
- * @param version The protocol version (default: 3.3)
+ * Base access for Tuya devices providing high-level control and status operations.
  */
 open class TuyaDevice(
-    val deviceId: String,
-    val localKey: String,
-    val host: String,
-    val port: Int = 6668,
-    val version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
+    val config: DeviceConnectionConfig,
 ): AutoCloseable {
-    protected val cipher = TuyaCipher(localKey)
+    protected val cipher = TuyaCipher(config.deviceLocalKey)
     protected val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var connection: TuyaConnection? = null
@@ -71,10 +62,12 @@ open class TuyaDevice(
     var statusPollInterval: Duration? = null // null = no polling
 
     constructor(discoveredDevice: DiscoveredDevice, productKey: String) : this(
-        deviceId = discoveredDevice.gwId,
-        localKey = productKey,
-        host = discoveredDevice.ip,
-        version = discoveredDevice.version,
+        DeviceConnectionConfig(
+            deviceId = discoveredDevice.gwId,
+            deviceLocalKey = productKey,
+            host = discoveredDevice.ip,
+            version = discoveredDevice.version,
+        )
     )
 
     /**
@@ -85,14 +78,7 @@ open class TuyaDevice(
             return this // Already connected or connecting
         }
 
-        val conn = TuyaConnection(
-            host = host,
-            port = port,
-            deviceId = deviceId,
-            cipher = cipher,
-            version = version,
-            scope = scope
-        )
+        val conn = TuyaConnection(config, cipher, scope)
 
         connection = conn
 
@@ -140,7 +126,7 @@ open class TuyaDevice(
                 startStatusPolling(interval)
             }
         }
-        logger.info { "Device $deviceId connected and initialized" }
+        logger.info { "Device ${config.deviceId} connected and initialized" }
 
         return this
     }
@@ -166,7 +152,7 @@ open class TuyaDevice(
     suspend fun refresh(): DeviceStatus {
         ensureConnected()
 
-        val message = when (version) {
+        val message = when (config.version) {
             TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
                 TuyaMessage.createWithJsonPayload(
                     command = TuyaCommand.DP_QUERY_NEW,
@@ -176,8 +162,8 @@ open class TuyaDevice(
                 TuyaMessage.createWithJsonPayload(
                     command = TuyaCommand.DP_QUERY,
                     json = buildJsonObject {
-                        put("gwId", deviceId)
-                        put("devId", deviceId)
+                        put("gwId", config.deviceId)
+                        put("devId", config.deviceId)
                     }.toString()
                 )
         }
@@ -202,7 +188,7 @@ open class TuyaDevice(
     suspend fun setDps(dps: Map<String, JsonElement>): DeviceStatus {
         ensureConnected()
 
-        val message = when (version) {
+        val message = when (config.version) {
             TuyaProtocolVersion.V3_4, TuyaProtocolVersion.V3_5 ->
                 TuyaMessage.createWithJsonPayload(
                     command = TuyaCommand.CONTROL_NEW,
@@ -217,8 +203,8 @@ open class TuyaDevice(
                 TuyaMessage.createWithJsonPayload(
                     command = TuyaCommand.CONTROL,
                     json = buildJsonObject {
-                        put("devId", deviceId)
-                        put("uid", deviceId)
+                        put("devId", config.deviceId)
+                        put("uid", config.deviceId)
                         // put("uid", "")
                         put("t", (System.currentTimeMillis() / 1000).toString())
                         put("dps", JsonObject(dps))

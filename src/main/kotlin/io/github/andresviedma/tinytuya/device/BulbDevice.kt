@@ -2,7 +2,7 @@ package io.github.andresviedma.tinytuya.device
 
 import io.github.andresviedma.tinytuya.model.DeviceStatus
 import io.github.andresviedma.tinytuya.model.buildDps
-import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
+import io.github.andresviedma.tinytuya.network.DeviceConnectionConfig
 import kotlin.math.roundToInt
 
 /**
@@ -15,20 +15,10 @@ import kotlin.math.roundToInt
  * - 4: Color temperature (0-1000)
  * - 5: Color (HSV format: hhhhssssvvvv in hex)
  * - 6: Scene
- *
- * @param deviceId The device ID
- * @param localKey The local encryption key
- * @param host The device IP address
- * @param port The device port
- * @param version The protocol version
  */
 class BulbDevice(
-    deviceId: String,
-    localKey: String,
-    host: String,
-    port: Int = 6668,
-    version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3
-) : TuyaDevice(deviceId, localKey, host, port, version) {
+    config: DeviceConnectionConfig,
+) : TuyaDevice(config) {
 
     companion object {
         const val DP_POWER = "1"

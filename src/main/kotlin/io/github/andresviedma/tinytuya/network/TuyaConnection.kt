@@ -41,35 +41,17 @@ import java.security.SecureRandom
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.fetchAndIncrement
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
 
 private val logger = KotlinLogging.logger {}
 
 /**
  * Manages TCP connection to a Tuya device with automatic message routing and heartbeat.
- *
- * @param host The device IP address or hostname
- * @param port The device port (default: 6668)
- * @param deviceId The device ID for encryption
- * @param cipher The cipher for encrypting/decrypting messages
- * @param version The protocol version to use
- * @param scope The coroutine scope for managing connection lifecycle
- * @param connectionTimeout Timeout for establishing connection
- * @param responseTimeout Timeout for waiting for responses
- * @param heartbeatInterval Interval for sending heartbeat messages
  */
 @OptIn(ExperimentalAtomicApi::class)
 class TuyaConnection(
-    private val host: String,
-    private val port: Int = 6668,
-    private val deviceId: String,
-    private val cipher: TuyaCipher,
-    private val version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3,
+    private val config: DeviceConnectionConfig,
+    cipher: TuyaCipher,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-    private val connectionTimeout: Duration = 10.seconds,
-    private val responseTimeout: Duration = 5.seconds,
-    private val heartbeatInterval: Duration = 30.seconds
 ) {
     private val writeMutex: Mutex = Mutex()
 
@@ -107,15 +89,15 @@ class TuyaConnection(
         _connectionState.value = ConnectionState.Connecting
 
         try {
-            withTimeout(connectionTimeout) {
+            withTimeout(config.connectionTimeout) {
                 val selectorManager = SelectorManager(Dispatchers.IO)
                 socket = aSocket(selectorManager)
                     .tcp()
-                    .connect(host, port)
+                    .connect(config.host, config.port)
 
                 // For v3.4+ run the session key handshake before the receive loop starts.
                 // The handshake reads/writes directly on the socket channel.
-                if (version >= TuyaProtocolVersion.V3_4) {
+                if (config.version >= TuyaProtocolVersion.V3_4) {
                     val input = socket!!.openReadChannel()
                     negotiateSessionKey(input)
                     // Store the read channel so startReceiving() reuses it
@@ -171,8 +153,8 @@ class TuyaConnection(
             // Encode and send
             val encoded = messageWithSeq.encode(
                 cipher = activeCipher,
-                version = version,
-                deviceId = deviceId
+                version = config.version,
+                deviceId = config.deviceId
             )
             logger.debug { "Message: ${encoded.toHexString()}"}
 
@@ -183,7 +165,7 @@ class TuyaConnection(
             } ?: throw IllegalStateException("Socket is null")
 
             // Wait for response with timeout
-            return withTimeout(responseTimeout) {
+            return withTimeout(config.responseTimeout) {
                 deferred.await()
             }
 
@@ -217,8 +199,8 @@ class TuyaConnection(
 
         val encoded = messageWithSeq.encode(
             cipher = activeCipher,
-            version = version,
-            deviceId = deviceId
+            version = config.version,
+            deviceId = config.deviceId
         )
         logger.debug { "Message: ${encoded.toHexString()}"}
 
@@ -258,7 +240,7 @@ class TuyaConnection(
             sequenceNumber = nextSequenceNumber(),
         )
         writeMutex.withLock {
-            writeChannel().writeFully(step1.encode(cipher = realCipher, version = version))
+            writeChannel().writeFully(step1.encode(cipher = realCipher, version = config.version))
         }
 
         // Step 2 — read SESS_KEY_NEG_RESP from device
@@ -271,7 +253,7 @@ class TuyaConnection(
             step2Payload = step2Frame.payload,
             realCipher   = realCipher,
             clientNonce  = clientNonce,
-            version      = version,
+            version      = config.version,
         )
         logger.debug { "Session key negotiation step 2 ok, deviceNonce=${deviceNonce.toHexString()}" }
 
@@ -283,7 +265,7 @@ class TuyaConnection(
             sequenceNumber = nextSequenceNumber(),
         )
         writeMutex.withLock {
-            writeChannel().writeFully(step3.encode(cipher = realCipher, version = version))
+            writeChannel().writeFully(step3.encode(cipher = realCipher, version = config.version))
         }
 
         // Derive and install the session key
@@ -291,7 +273,7 @@ class TuyaConnection(
             clientNonce = clientNonce,
             deviceNonce = deviceNonce,
             realCipher  = realCipher,
-            version     = version,
+            version     = config.version,
         )
         activeCipher = TuyaCipher(sessionKey)
         logger.debug { "Session key negotiation complete, sessionKey=${sessionKey.toHexString()}" }
@@ -307,7 +289,7 @@ class TuyaConnection(
         val payloadLength = header.toIntBE(8)
         val remaining = ByteArray(payloadLength).also { input.readFully(it, 0, payloadLength) }
         val fullMessage = prefix + header + remaining
-        return TuyaMessage.decode(data = fullMessage, cipher = cipherForDecode, version = version)
+        return TuyaMessage.decode(data = fullMessage, cipher = cipherForDecode, version = config.version)
     }
 
     private fun startReceiving() {
@@ -381,7 +363,7 @@ class TuyaConnection(
         return TuyaMessage.decode(
             data = fullMessage,
             cipher = activeCipher,
-            version = version
+            version = config.version,
         )
     }
 
@@ -405,7 +387,7 @@ class TuyaConnection(
     private fun startHeartbeat() {
         heartbeatJob = scope.launch {
             while (isActive && _connectionState.value == ConnectionState.Connected) {
-                delay(heartbeatInterval)
+                delay(config.heartbeatInterval)
                 try {
                     sendHeartbeat()
                 } catch (_: CancellationException) {

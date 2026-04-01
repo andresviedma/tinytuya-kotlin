@@ -3,6 +3,7 @@ package io.github.andresviedma.tinytuya.protocol
 import io.github.andresviedma.tinytuya.crypto.TuyaCipher
 import io.github.andresviedma.tinytuya.network.TuyaScanner
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.hexToBytes
+import io.github.andresviedma.tinytuya.protocol.ByteUtils.macSha256
 import io.github.andresviedma.tinytuya.protocol.ByteUtils.toHexString
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -80,6 +81,62 @@ class TuyaMessageTest {
     }
 
     @Test
+    fun testKk() {
+        val remoteNonce = "77e150f700d344b1"
+        val rkeyHmac = remoteNonce.toByteArray(Charsets.UTF_8).macSha256(localKey)
+        println(rkeyHmac.toHexString())
+
+        val ciphered = cipher.encrypt(rkeyHmac)
+        println(ciphered.toHexString())
+        val message = TuyaMessage(
+            command = TuyaCommand.SESS_KEY_NEG_FINISH,
+            payload = rkeyHmac,
+            sequenceNumber = 2,
+        )
+        val result = message.encode(
+            version = TuyaProtocolVersion.V3_4,
+            cipher = cipher,
+            deviceId = deviceId,
+        ).toHexString()
+
+        println(result)
+
+
+        // 'cbca35543bf6d33a4d827ae52ccf2c711840bdea54201304dc544960e2636830'
+        //  cbca35543bf6d33a4d827ae52ccf2c711840bdea54201304dc544960e2636830
+
+        // payload encriptado
+        // 'cbca35543bf6d33a4d827ae52ccf2c711840bdea54201304dc544960e2636830'
+        // '62b218d47f150cf396e48355e80f26597d28206c430a91f54f0494ae1ecf9bb711e6ac7806d5759a3b5da8a05da8b85d'
+        //  62b218d47f150cf396e48355e80f26597d28206c430a91f54f0494ae1ecf9bb711e6ac7806d5759a3b5da8a05da8b85d
+        // '000055aa00000002000000050000005462b218d47f150cf396e48355e80f26597d28206c430a91f54f0494ae1ecf9bb711e6ac7806d5759a3b5da8a05da8b85d86c8f3b17f88160b4d0bc338ebf52942fa845d7e95a4d33dd61f45cc533784010000aa55'
+        //  000055aa00000002000000050000005462b218d47f150cf396e48355e80f26597d28206c430a91f54f0494ae1ecf9bb711e6ac7806d5759a3b5da8a05da8b85d86c8f3b17f88160b4d0bc338ebf52942fa845d7e95a4d33dd61f45cc533784010000aa55
+    }
+
+    @Test
+    fun testDecode3_4() {
+        val message = "000055aa00004098000000040000006800000000c507b7df11398d70196da2b0d733742e025e47725b6213cce72f220c81e5a4d38216608c26bc3fad4c2f065b7979c44411e6ac7806d5759a3b5da8a05da8b85dce16484a2e2c0b9071ebe018d7171692f6bf678dd908a67aa49064a3503da25c0000aa55"
+        val result = TuyaMessage.decode(
+            data = message.hexToBytes(),
+            cipher = TuyaCipher(localKey),
+            version = TuyaProtocolVersion.V3_4,
+        )
+
+        println("message: $result")
+        assertEquals(TuyaCommand.SESS_KEY_NEG_RESP, result.command)
+        assertEquals(16536, result.sequenceNumber)
+        assertEquals(0, result.returnCode)
+
+        val localNonce = "0123456789abcdef" // not-so-random random key
+        val remoteNonce = result.payload.copyOfRange(0, 16)
+        val hmacChecksum = result.payload.copyOfRange(16, 48).toHexString()
+        val hmacCheck = localNonce.toByteArray(Charsets.UTF_8).macSha256(localKey).toHexString()
+        require(hmacCheck == hmacChecksum) { "Session key negotiation step 2 failed HMAC check! wanted=$hmacChecksum but got=$hmacCheck" }
+
+        assertEquals("0160771332ce8ed1", remoteNonce.toString(Charsets.UTF_8))
+    }
+
+    @Test
     fun testEncode3_4() {
         val message = TuyaMessage.createWithJsonPayload(
             command = TuyaCommand.STATUS,
@@ -108,6 +165,28 @@ class TuyaMessageTest {
         // checksum (header + payload) and suffix
         result.assert("sha256", result.length - 72, result.length - 9, "c33113cbc906b66daa5316e5242e9c603ea0da2281c98bf5dc794e02908ad804")
         result.assert("message suffix", result.length - 8, result.length - 1, "0000aa55")
+    }
+
+    @Test
+    fun testEncode3_4_Status() {
+        val message = TuyaMessage.createWithJsonPayload(
+            command = TuyaCommand.DP_QUERY_NEW,
+            json = """0123456789abcdef""", // este es el del 3, {} es el del 0x10
+            sequenceNumber = 1,
+        )
+
+        val result = message.encode(
+            version = TuyaProtocolVersion.V3_4,
+            cipher = cipher,
+            deviceId = deviceId,
+        ).toHexString()
+
+        println(result)
+        // payload: {}
+        // payload: '571d5bf8dfe338fc244c78615df3e17811e6ac7806d5759a3b5da8a05da8b85d'
+        // message completo: '000055aa000000010000000300000044571d5bf8dfe338fc244c78615df3e17811e6ac7806d5759a3b5da8a05da8b85dae1ff6d41aefa87231cca53b972e65e61c43b84ee30af9f455a1b21b2288bc9f0000aa55'
+        // kotlin:            000055aa000000010000000300000044571d5bf8dfe338fc244c78615df3e17811e6ac7806d5759a3b5da8a05da8b85dae1ff6d41aefa87231cca53b972e65e61c43b84ee30af9f455a1b21b2288bc9f0000aa55
+        // payload sin encriptar???: b'0123456789abcdef'
     }
 
     @Test

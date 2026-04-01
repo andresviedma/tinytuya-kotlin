@@ -1,7 +1,7 @@
 package io.github.andresviedma.tinytuya.device
 
 import io.github.andresviedma.tinytuya.model.DeviceStatus
-import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
+import io.github.andresviedma.tinytuya.network.DeviceConnectionConfig
 
 /**
  * Represents a Tuya smart outlet/plug device.
@@ -12,20 +12,10 @@ import io.github.andresviedma.tinytuya.protocol.TuyaProtocolVersion
  * - 4: Current (mA)
  * - 5: Power (W)
  * - 6: Voltage (V)
- *
- * @param deviceId The device ID
- * @param localKey The local encryption key
- * @param host The device IP address
- * @param port The device port
- * @param version The protocol version
  */
 class OutletDevice(
-    deviceId: String,
-    localKey: String,
-    host: String,
-    port: Int = 6668,
-    version: TuyaProtocolVersion = TuyaProtocolVersion.V3_3
-) : TuyaDevice(deviceId, localKey, host, port, version) {
+    config: DeviceConnectionConfig,
+) : TuyaDevice(config) {
 
     companion object {
         const val DP_POWER = "1"
