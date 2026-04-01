@@ -23,7 +23,7 @@ class FogMachine(
     private var offJob: Job? = null
     private var offInstant: Instant? = null
 
-constructor(config: DeviceConnectionConfig) : this(TuyaDevice(config))
+    constructor(config: DeviceConnectionConfig) : this(TuyaDevice(config))
 
     suspend fun connect(): FogMachine {
         device.connect()
