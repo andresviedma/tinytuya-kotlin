@@ -31,6 +31,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 private val logger = KotlinLogging.logger {}
@@ -118,14 +119,13 @@ open class TuyaDevice(
         conn.connect()
 
         // Wait for initialized
-        while (!initialized) {
-            delay(10)
+        while (!initialized) { delay(10.milliseconds) }
 
-            // Start status polling if configured
-            statusPollInterval?.let { interval ->
-                startStatusPolling(interval)
-            }
+        // Start status polling if configured
+        statusPollInterval?.let { interval ->
+            startStatusPolling(interval)
         }
+
         logger.info { "Device ${config.deviceId} connected and initialized" }
 
         return this
@@ -353,7 +353,7 @@ open class TuyaDevice(
 
             try {
                 connection?.connect()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Reconnect failed, will try again on next failure
             }
         }
