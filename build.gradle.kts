@@ -1,13 +1,22 @@
+@Suppress("DSL_SCOPE_VIOLATION")
 plugins {
-    kotlin("jvm") version "2.1.21"
-    kotlin("plugin.serialization") version "2.1.21"
+    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.publishOnCentral)
+    alias(libs.plugins.dokka)
+    `java-library`
+    jacoco
 }
-
-group = "io.github.andresviedma.tinytuya"
-version = "1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
+}
+
+group = "io.github.andresviedma.tinytuya"
+val libVersion: String by project
+version = libVersion
+
+kotlin {
+    jvmToolchain(1_8)
 }
 
 dependencies {
@@ -22,9 +31,28 @@ dependencies {
     testImplementation("ch.qos.logback:logback-classic:1.5.23")
 }
 
-tasks.test {
+tasks.withType<Test>().configureEach {
     useJUnitPlatform()
 }
-kotlin {
-    jvmToolchain(23)
+
+publishOnCentral {
+    val repoOwner = "andresviedma"
+    projectLongName.set("TinyTuya-kotlin")
+    projectDescription.set("Kotlin port of tinytuya, library to interface with Tuya WiFi smart devices")
+    scmConnection.set("scm:git:https://github.com/$repoOwner/${rootProject.name}")
+    projectUrl.set("https://github.com/$repoOwner/${rootProject.name}")
+    licenseName.set("Apache License 2.0")
+    licenseUrl.set("https://www.apache.org/licenses/LICENSE-2.0")
+}
+
+publishing.publications.withType<MavenPublication>().configureEach {
+    pom {
+        developers {
+            developer {
+                id.set("andresviedma")
+                name.set("Andrés Viedma")
+                email.set("andres.viedma@gmail.com")
+            }
+        }
+    }
 }
