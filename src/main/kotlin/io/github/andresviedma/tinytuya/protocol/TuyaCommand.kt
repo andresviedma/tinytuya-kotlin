@@ -71,6 +71,11 @@ sealed class TuyaCommand(val code: Int) {
     data object SESS_KEY_NEG_FINISH : TuyaCommand(0x05)
 
     /**
+     * Scan response (protocol 3.4+)
+     */
+    data object BOARDCAST_LPV34: TuyaCommand(0x23) // 35: FR_TYPE_BOARDCAST_LPV34
+
+    /**
      * Local network time query
      */
     data object LAN_GW_ACTIVE : TuyaCommand(0x25)
@@ -101,6 +106,7 @@ sealed class TuyaCommand(val code: Int) {
             0x40 -> LAN_EXT_STREAM
 
             0x13 -> DISCOVER
+            0x23 -> BOARDCAST_LPV34
             else -> null
         }
     }

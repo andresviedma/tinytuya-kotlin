@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.util.Base64
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 private val logger = KotlinLogging.logger {}
@@ -86,6 +87,35 @@ class RFRemoteControlDevice(
             endStudy   = { rfStudyEnd(freq) },
             timeout    = timeout,
         )
+    }
+
+    /**
+     * Enters RF study mode and waits up to [timeout] for the user to press a button on a
+     * real remote.  Returns the learned code as a Base64 string, or null on timeout.
+     *
+     * @param freq Carrier frequency string (pass `"0"` to auto-detect).
+     */
+    suspend fun rfReceiveButtons(freq: String = "0", timeout: Duration = 30.seconds): List<String> {
+        logger.debug { "Receiving RF buttons (freq=$freq, timeout=$timeout)" }
+        rfStudyEnd(freq)
+        rfStudyStart(freq)
+        val result = mutableSetOf<String>()
+        try {
+            device.pollStatus(interval = 50.milliseconds, duration = timeout).collect { status ->
+                val code = when {
+                    status.has(RemoteControlDps.DP_LEARNED_ID)     -> status.getString(RemoteControlDps.DP_LEARNED_ID)
+                    status.has(RemoteControlDps.DP_LEARNED_REPORT) -> status.getString(RemoteControlDps.DP_LEARNED_REPORT)
+                    else -> null
+                }
+                if (code != null && !result.contains(code)) {
+                    result += code
+                    println("**** DETECTED: $code")
+                }
+            }
+        } finally {
+            rfStudyEnd(freq)
+        }
+        return result.toList()
     }
 
     /**

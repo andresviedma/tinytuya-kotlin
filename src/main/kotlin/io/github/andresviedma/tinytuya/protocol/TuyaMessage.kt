@@ -43,7 +43,8 @@ data class TuyaMessage(
         deviceId: String? = null
     ): ByteArray {
         // Prepare payload
-        logger.debug { "Payload to send: ${payload.toString(Charsets.UTF_8)}" }
+        logger.debug { "Payload to send: ${payload.toHexString()}" }
+        // logger.debug { "Payload to send: ${payload.toString(Charsets.UTF_8)}" }
         val finalPayload = preparePayload(payload, cipher, version)
         logger.debug { "Encrypted payload: " + finalPayload.toHexString() }
 
@@ -238,7 +239,8 @@ data class TuyaMessage(
 
             // Decrypt payload
             val payload = decryptPayload(encryptedPayload, cipher, version)
-            logger.debug { "Received payload: ${String(payload, Charsets.UTF_8)}" }
+            logger.debug { "Received payload: ${payload.toHexString()}" }
+            // logger.debug { "Received payload: ${String(payload, Charsets.UTF_8)}" }
 
             return TuyaMessage(
                 command = command,

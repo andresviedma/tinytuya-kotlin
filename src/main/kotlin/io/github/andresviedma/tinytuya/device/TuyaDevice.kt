@@ -19,9 +19,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -30,9 +32,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.ExperimentalTime
 
 private val logger = KotlinLogging.logger {}
 
@@ -378,6 +382,22 @@ open class TuyaDevice(
             }
         }
     }
+
+    @OptIn(ExperimentalTime::class)
+    fun pollStatus(interval: Duration, duration: Duration): Flow<DeviceStatus> =
+        flow {
+            val t0 = Clock.System.now()
+            while (_isConnected.value && (Clock.System.now() - t0) < duration) {
+                delay(interval)
+                try {
+                    val status = refresh()
+                    emit(status)
+                } catch (e: Exception) {
+                    // Ignore polling errors
+                    logger.warn { "Error refreshing status: ${e.message}" }
+                }
+            }
+        }
 
     private fun stopStatusPolling() {
         statusMonitorJob?.cancel()
